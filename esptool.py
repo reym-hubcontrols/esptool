@@ -1802,6 +1802,14 @@ class ImageSegment(object):
             r += " file_offs 0x%08x" % (self.file_offs)
         return r
 
+    def get_memory_type(self, image):
+        """
+        Return a string describing the memory type(s) that is covered by this
+        segment's start address.
+        """
+        ranges = [map_range[2] for map_range in image.ROM_LOADER.MEMORY_MAP if map_range[0] <= self.addr < map_range[1]]
+        return ", ".join(ranges)
+
     def pad_to_alignment(self, alignment):
         self.data = pad_to(self.data, alignment, b'\x00')
 
@@ -1930,6 +1938,35 @@ class BaseFirmwareImage(object):
     def get_non_irom_segments(self):
         irom_segment = self.get_irom_segment()
         return [s for s in self.segments if s != irom_segment]
+
+    def merge_adjacent_segments(self):
+        if not self.segments:
+            return  # nothing to merge
+
+        def merge_adjacent(segments):
+            elem = segments[0]
+
+            for next_elem in segments[1:]:
+                elem.file_offs = None  # will no longer be valid
+
+                if all((elem.get_memory_type(self) == next_elem.get_memory_type(self),
+                       elem.include_in_checksum == next_elem.include_in_checksum,
+                       next_elem.addr == elem.addr + len(elem.data))):
+                    # Merge any segment that ends where the next one starts, without spanning memory types
+                    #
+                    # (don't 'pad' any gaps here as they may be excluded from the image due to 'noinit'
+                    # or other reasons.)
+                    elem.data += next_elem.data
+                else:
+                    yield elem
+                    elem = next_elem
+
+            yield elem
+
+        # note: we could sort segments here as well, but the ordering of segments is sometimes
+        # important for other reasons (like embedded ELF SHA-256), so we assume that the linker
+        # script will have produced any adjacent sections in linear order in the ELF, anyhow.
+        self.segments = list(merge_adjacent(self.segments))
 
 
 class ESP8266ROMFirmwareImage(BaseFirmwareImage):
@@ -2165,8 +2202,7 @@ class ESP32FirmwareImage(BaseFirmwareImage):
 
             # check for multiple ELF sections that are mapped in the same flash mapping region.
             # this is usually a sign of a broken linker script, but if you have a legitimate
-            # use case then let us know (we can merge segments here, but as a rule you probably
-            # want to merge them in your linker script.)
+            # use case then let us know
             if len(flash_segments) > 0:
                 last_addr = flash_segments[0].addr
                 for segment in flash_segments[1:]:
@@ -2847,7 +2883,7 @@ def image_info(args):
     idx = 0
     for seg in image.segments:
         idx += 1
-        seg_name = ", ".join([seg_range[2] for seg_range in image.ROM_LOADER.MEMORY_MAP if seg_range[0] <= seg.addr < seg_range[1]])
+        seg_name = seg.get_memory_type(image)
         print('Segment %d: %r [%s]' % (idx, seg, seg_name))
     calc_checksum = image.calculate_checksum()
     print('Checksum: %02x (%s)' % (image.checksum,
@@ -2908,6 +2944,12 @@ def elf2image(args):
     if args.elf_sha256_offset:
         image.elf_sha256 = e.sha256()
         image.elf_sha256_offset = args.elf_sha256_offset
+
+    before = len(image.segments)
+    image.merge_adjacent_segments()
+    if len(image.segments) != before:
+        delta = before - len(image.segments)
+        print("Merged %d ELF section%s" % (delta, "s" if delta > 1 else ""))
 
     image.verify()
 
