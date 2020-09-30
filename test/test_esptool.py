@@ -700,7 +700,7 @@ if __name__ == '__main__':
     try:
         import xmlrunner
 
-        with open('report.xml', 'w' if sys.version[0] == '2' else 'wb') as output:
+        with open('report.xml', 'w') as output:
             unittest.main(
                 testRunner=xmlrunner.XMLTestRunner(output=output))
     except ImportError:
